@@ -1,4 +1,4 @@
-const API_URL = 'http://192.168.2.10:8000';
+const API_URL = 'https://scanner-app-r6ye.onrender.com';
 
 console.log('APP GEBRUIKT API_URL:', API_URL);
 
