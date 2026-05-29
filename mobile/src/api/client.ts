@@ -1,11 +1,7 @@
-const API_URL = 'https://scanner-app-r6ye.onrender.com';
-
-console.log('APP GEBRUIKT API_URL:', API_URL);
+const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_URL}${path}`;
-
-  console.log('API request naar:', url);
 
   try {
     const response = await fetch(url, {
@@ -15,8 +11,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       },
       ...options
     });
-
-    console.log('API response status:', response.status);
 
     if (!response.ok) {
       let message = 'Er ging iets mis';
