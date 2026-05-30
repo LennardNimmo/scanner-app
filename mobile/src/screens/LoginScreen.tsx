@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, StyleSheet, Text, TextInput, View } from 'react-native';
-import { api } from '../api/client';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
 import { useAuth } from '../context/AuthContext';
 import { colors, spacing } from '../theme';
 
 export function LoginScreen() {
-  const { setSession } = useAuth();
+  const { signIn, signUp } = useAuth();
   const [isRegister, setIsRegister] = useState(true);
   const [email, setEmail] = useState('demo@example.com');
   const [password, setPassword] = useState('demo1234');
@@ -17,10 +16,11 @@ export function LoginScreen() {
   async function submit() {
     setLoading(true);
     try {
-      const response: any = isRegister
-        ? await api.register(email, password, fullName)
-        : await api.login(email, password);
-      setSession(response.token, response.user);
+      if (isRegister) {
+        await signUp(email, password, fullName);
+      } else {
+        await signIn(email, password);
+      }
     } catch (error: any) {
       Alert.alert('Login mislukt', error.message);
     } finally {

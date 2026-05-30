@@ -2,31 +2,32 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from hashlib import sha256
 from itertools import product as cartesian_product
 import os
 from typing import Any, Dict
 from uuid import UUID, uuid4
 
+import httpx
 import psycopg
 from psycopg.rows import dict_row
-from fastapi import FastAPI, HTTPException
+from psycopg.types.json import Jsonb
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .payments import authorize_mock_payment, capture_mock_payment
 from .schemas import (
     CartItemUpdateRequest,
     CheckoutRequest,
-    LoginRequest,
     ManualShipmentRequest,
-    RegisterRequest,
     ScanRequest,
     SellerOfferUpdateRequest,
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-app = FastAPI(title="Scan Marketplace API", version="0.2.0")
+app = FastAPI(title="Scan Marketplace API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,22 +67,9 @@ def row_json(row):
     return jsonable(dict(row)) if row else None
 
 
-def hash_password(password: str) -> str:
-    salt = uuid4().hex
-    digest = sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
-    return f"{salt}:{digest}"
-
-
-def verify_password(password: str, stored_hash: str | None) -> bool:
-    if not stored_hash or ":" not in stored_hash:
-        return False
-    salt, digest = stored_hash.split(":", 1)
-    return sha256(f"{salt}:{password}".encode("utf-8")).hexdigest() == digest
-
-
 def public_user(user: dict) -> dict:
     user = jsonable(user)
-    return {"id": user["id"], "email": user["email"], "full_name": user.get("full_name")}
+    return {"id": user["id"], "email": user.get("email"), "full_name": user.get("full_name")}
 
 
 def eta_from_days(days: int | None) -> str:
@@ -110,44 +98,68 @@ def offer_response(row: dict) -> dict:
     return offer
 
 
+def require_auth(authorization: str | None = Header(default=None)) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=500, detail="Supabase Auth is not configured")
+
+    access_token = authorization.split(" ", 1)[1].strip()
+    try:
+        response = httpx.get(
+            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "apikey": SUPABASE_ANON_KEY,
+            },
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=401, detail="Could not verify auth token") from exc
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired auth token")
+
+    data = response.json()
+    metadata = data.get("user_metadata") or {}
+    return {
+        "id": data["id"],
+        "email": data.get("email"),
+        "full_name": metadata.get("full_name") or metadata.get("name") or data.get("email", "").split("@")[0],
+    }
+
+
+def assert_same_user(user_id: str, auth_user: dict):
+    if str(user_id) != str(auth_user["id"]):
+        raise HTTPException(status_code=403, detail="You can only access your own data")
+
+
+def ensure_user_profile(conn, auth_user: dict):
+    user = conn.execute(
+        """
+        insert into app_users (id, email, full_name, password_hash)
+        values (%s, %s, %s, null)
+        on conflict (id)
+        do update set email=excluded.email,
+                      full_name=coalesce(excluded.full_name, app_users.full_name)
+        returning id, email, full_name
+        """,
+        (auth_user["id"], auth_user.get("email"), auth_user.get("full_name")),
+    ).fetchone()
+    ensure_active_cart(conn, str(user["id"]))
+    return user
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/auth/register")
-def register(payload: RegisterRequest) -> Dict[str, Any]:
-    email = payload.email.lower().strip()
-    full_name = payload.full_name or email.split("@")[0]
+@app.get("/auth/me")
+def me(auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
     with db() as conn:
-        existing = conn.execute("select id from app_users where lower(email)=lower(%s)", (email,)).fetchone()
-        if existing:
-            raise HTTPException(status_code=409, detail="Email already registered")
-        user = conn.execute(
-            """
-            insert into app_users (email, full_name, password_hash)
-            values (%s, %s, %s)
-            returning id, email, full_name
-            """,
-            (email, full_name, hash_password(payload.password)),
-        ).fetchone()
-        conn.execute("insert into carts (user_id, status) values (%s, 'active')", (user["id"],))
-    user_public = public_user(user)
-    return {"token": f"mock-token-{user_public['id']}", "user": user_public}
-
-
-@app.post("/auth/login")
-def login(payload: LoginRequest) -> Dict[str, Any]:
-    email = payload.email.lower().strip()
-    with db() as conn:
-        user = conn.execute(
-            "select id, email, full_name, password_hash from app_users where lower(email)=lower(%s)",
-            (email,),
-        ).fetchone()
-    if not user or not verify_password(payload.password, user.get("password_hash")):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    user_public = public_user(user)
-    return {"token": f"mock-token-{user_public['id']}", "user": user_public}
+        user = ensure_user_profile(conn, auth_user)
+    return {"user": public_user(user)}
 
 
 @app.get("/products")
@@ -213,6 +225,7 @@ def list_sellers() -> Dict[str, Any]:
 
 @app.post("/seller/offers")
 def update_seller_offer(payload: SellerOfferUpdateRequest) -> Dict[str, Any]:
+    # MVP: still unauthenticated. Later, restrict this to seller/admin accounts.
     with db() as conn:
         if not conn.execute("select id from sellers where id=%s", (payload.seller_id,)).fetchone():
             raise HTTPException(status_code=404, detail="Seller not found")
@@ -242,13 +255,6 @@ def update_seller_offer(payload: SellerOfferUpdateRequest) -> Dict[str, Any]:
     return {"offer": row_json(row)}
 
 
-def ensure_user(conn, user_id: str):
-    user = conn.execute("select id, email, full_name from app_users where id=%s", (user_id,)).fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-
 def ensure_active_cart(conn, user_id: str):
     cart = conn.execute(
         """
@@ -267,9 +273,10 @@ def ensure_active_cart(conn, user_id: str):
 
 
 @app.post("/scan")
-def scan(payload: ScanRequest) -> Dict[str, Any]:
+def scan(payload: ScanRequest, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(payload.user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, payload.user_id)
+        ensure_user_profile(conn, auth_user)
         product = get_product_by_gtin(conn, payload.gtin)
         if not product:
             raise HTTPException(status_code=404, detail="Barcode not found in catalog")
@@ -288,9 +295,10 @@ def scan(payload: ScanRequest) -> Dict[str, Any]:
 
 
 @app.get("/cart/{user_id}")
-def get_cart(user_id: str) -> Dict[str, Any]:
+def get_cart(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, user_id)
+        ensure_user_profile(conn, auth_user)
         return cart_response(conn, user_id)
 
 
@@ -325,9 +333,10 @@ def cart_response(conn, user_id: str) -> Dict[str, Any]:
 
 
 @app.post("/cart/items")
-def update_cart_item(payload: CartItemUpdateRequest) -> Dict[str, Any]:
+def update_cart_item(payload: CartItemUpdateRequest, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(payload.user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, payload.user_id)
+        ensure_user_profile(conn, auth_user)
         if not get_product_by_id(conn, payload.product_id):
             raise HTTPException(status_code=404, detail="Product not found")
         cart = ensure_active_cart(conn, payload.user_id)
@@ -440,24 +449,26 @@ def calculate_optimization(conn, user_id: str) -> dict:
 
 
 @app.post("/cart/{user_id}/optimize")
-def optimize(user_id: str) -> Dict[str, Any]:
+def optimize(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, user_id)
+        ensure_user_profile(conn, auth_user)
         try:
             result = calculate_optimization(conn, user_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         conn.execute(
             "insert into cart_optimizations (id, user_id, result_json) values (%s, %s, %s)",
-            (result["id"], user_id, jsonable(result)),
+            (result["id"], user_id, Jsonb(jsonable(result))),
         )
     return {"optimization": result}
 
 
 @app.post("/checkout")
-def checkout(payload: CheckoutRequest) -> Dict[str, Any]:
+def checkout(payload: CheckoutRequest, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(payload.user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, payload.user_id)
+        ensure_user_profile(conn, auth_user)
         optimization_row = conn.execute(
             "select id, result_json from cart_optimizations where id=%s and user_id=%s",
             (payload.optimization_id, payload.user_id),
@@ -527,9 +538,10 @@ def checkout(payload: CheckoutRequest) -> Dict[str, Any]:
 
 
 @app.get("/orders/{user_id}")
-def list_orders(user_id: str) -> Dict[str, Any]:
+def list_orders(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, user_id)
+        ensure_user_profile(conn, auth_user)
         rows = conn.execute(
             "select id, user_id, total_cents, payment_status, order_status, created_at from orders where user_id=%s order by created_at desc",
             (user_id,),
@@ -538,9 +550,10 @@ def list_orders(user_id: str) -> Dict[str, Any]:
 
 
 @app.get("/shipments/{user_id}")
-def list_shipments(user_id: str) -> Dict[str, Any]:
+def list_shipments(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, user_id)
+        ensure_user_profile(conn, auth_user)
         shipments = shipments_for_user(conn, user_id)
     return {"shipments": shipments}
 
@@ -563,9 +576,10 @@ def shipments_for_user(conn, user_id: str) -> list[dict]:
 
 
 @app.post("/shipments/manual")
-def add_manual_shipment(payload: ManualShipmentRequest) -> Dict[str, Any]:
+def add_manual_shipment(payload: ManualShipmentRequest, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    assert_same_user(payload.user_id, auth_user)
     with db() as conn:
-        ensure_user(conn, payload.user_id)
+        ensure_user_profile(conn, auth_user)
         shipment = conn.execute(
             """
             insert into shipments (user_id, carrier, tracking_code, description, status, eta)
