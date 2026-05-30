@@ -1,29 +1,19 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from hashlib import sha256
+from itertools import product as cartesian_product
+import os
 from typing import Any, Dict
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import psycopg
+from psycopg.rows import dict_row
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .mock_data import (
-    CARTS,
-    OFFERS,
-    OPTIMIZATIONS,
-    ORDERS,
-    PASSWORDS,
-    PRODUCTS,
-    SELLERS,
-    SHIPMENTS,
-    SHIPPING_RULES,
-    USERS,
-    eta_from_days,
-    get_product_by_gtin,
-    uid,
-)
-from .optimizer import optimize_cart
-from .payments import authorize_mock_payment, calculate_platform_fee, capture_mock_payment
+from .payments import authorize_mock_payment, capture_mock_payment
 from .schemas import (
     CartItemUpdateRequest,
     CheckoutRequest,
@@ -34,8 +24,9 @@ from .schemas import (
     SellerOfferUpdateRequest,
 )
 
-app = FastAPI(title="Scan Marketplace API", version="0.1.0")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
+app = FastAPI(title="Scan Marketplace API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,8 +36,78 @@ app.add_middleware(
 )
 
 
-def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
+def db():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+def jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [jsonable(item) for item in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    return value
+
+
+def rows_json(rows):
+    return [jsonable(dict(row)) for row in rows]
+
+
+def row_json(row):
+    return jsonable(dict(row)) if row else None
+
+
+def hash_password(password: str) -> str:
+    salt = uuid4().hex
+    digest = sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    return f"{salt}:{digest}"
+
+
+def verify_password(password: str, stored_hash: str | None) -> bool:
+    if not stored_hash or ":" not in stored_hash:
+        return False
+    salt, digest = stored_hash.split(":", 1)
+    return sha256(f"{salt}:{password}".encode("utf-8")).hexdigest() == digest
+
+
+def public_user(user: dict) -> dict:
+    user = jsonable(user)
     return {"id": user["id"], "email": user["email"], "full_name": user.get("full_name")}
+
+
+def eta_from_days(days: int | None) -> str:
+    return (date.today() + timedelta(days=days or 2)).isoformat()
+
+
+def calculate_platform_fee(subtotal_cents: int, commission_rate: float | Decimal | None) -> int:
+    return round(subtotal_cents * float(commission_rate or 0) / 100)
+
+
+def seller_response(row: dict) -> dict:
+    seller = row_json(row)
+    seller["company_name"] = seller.get("name")
+    return seller
+
+
+def offer_response(row: dict) -> dict:
+    offer = row_json(row)
+    offer["seller"] = {
+        "id": offer["seller_id"],
+        "name": offer["seller_name"],
+        "company_name": offer["seller_name"],
+        "commission_rate": offer.get("commission_rate"),
+        "support_email": offer.get("support_email"),
+    }
+    return offer
 
 
 @app.get("/health")
@@ -56,227 +117,462 @@ def health() -> Dict[str, str]:
 
 @app.post("/auth/register")
 def register(payload: RegisterRequest) -> Dict[str, Any]:
-    existing = next((u for u in USERS.values() if u["email"].lower() == payload.email.lower()), None)
-    if existing:
-        raise HTTPException(status_code=409, detail="Email already registered")
-
-    user_id = uid("usr")
-    user = {
-        "id": user_id,
-        "email": payload.email.lower(),
-        "full_name": payload.full_name or payload.email.split("@")[0],
-    }
-    USERS[user_id] = user
-    PASSWORDS[user_id] = payload.password
-    CARTS[user_id] = {}
-    return {"token": f"mock-token-{user_id}", "user": _public_user(user)}
+    email = payload.email.lower().strip()
+    full_name = payload.full_name or email.split("@")[0]
+    with db() as conn:
+        existing = conn.execute("select id from app_users where lower(email)=lower(%s)", (email,)).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="Email already registered")
+        user = conn.execute(
+            """
+            insert into app_users (email, full_name, password_hash)
+            values (%s, %s, %s)
+            returning id, email, full_name
+            """,
+            (email, full_name, hash_password(payload.password)),
+        ).fetchone()
+        conn.execute("insert into carts (user_id, status) values (%s, 'active')", (user["id"],))
+    user_public = public_user(user)
+    return {"token": f"mock-token-{user_public['id']}", "user": user_public}
 
 
 @app.post("/auth/login")
 def login(payload: LoginRequest) -> Dict[str, Any]:
-    user = next((u for u in USERS.values() if u["email"].lower() == payload.email.lower()), None)
-    if not user or PASSWORDS.get(user["id"]) != payload.password:
+    email = payload.email.lower().strip()
+    with db() as conn:
+        user = conn.execute(
+            "select id, email, full_name, password_hash from app_users where lower(email)=lower(%s)",
+            (email,),
+        ).fetchone()
+    if not user or not verify_password(payload.password, user.get("password_hash")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return {"token": f"mock-token-{user['id']}", "user": _public_user(user)}
+    user_public = public_user(user)
+    return {"token": f"mock-token-{user_public['id']}", "user": user_public}
 
 
 @app.get("/products")
 def list_products() -> Dict[str, Any]:
-    return {"products": list(PRODUCTS.values())}
+    with db() as conn:
+        products = conn.execute(
+            "select id, gtin, name, brand, image_url, category, created_at from products order by name"
+        ).fetchall()
+    return {"products": rows_json(products)}
+
+
+def get_product_by_gtin(conn, gtin: str):
+    return conn.execute(
+        "select id, gtin, name, brand, image_url, category from products where gtin=%s",
+        (gtin,),
+    ).fetchone()
+
+
+def get_product_by_id(conn, product_id: str):
+    return conn.execute(
+        "select id, gtin, name, brand, image_url, category from products where id=%s",
+        (product_id,),
+    ).fetchone()
+
+
+def get_offers_for_product(conn, product_id: str, quantity: int = 1) -> list[dict]:
+    rows = conn.execute(
+        """
+        select sp.id, sp.seller_id, sp.product_id, sp.price_cents, sp.stock_quantity,
+               sp.delivery_days_min, sp.delivery_days_max,
+               s.name as seller_name, s.support_email, s.commission_rate
+        from seller_products sp
+        join sellers s on s.id = sp.seller_id
+        where sp.product_id = %s and sp.stock_quantity >= %s
+        order by sp.price_cents asc
+        """,
+        (product_id, quantity),
+    ).fetchall()
+    return [offer_response(row) for row in rows]
 
 
 @app.get("/products/by-gtin/{gtin}")
 def product_by_gtin(gtin: str) -> Dict[str, Any]:
-    product = get_product_by_gtin(gtin)
-    if not product:
-        raise HTTPException(status_code=404, detail="Unknown barcode")
-    offers = [o for o in OFFERS if o["product_id"] == product["id"] and o["stock_quantity"] > 0]
-    return {"product": product, "offers": offers}
+    with db() as conn:
+        product = get_product_by_gtin(conn, gtin)
+        if not product:
+            raise HTTPException(status_code=404, detail="Unknown barcode")
+        offers = get_offers_for_product(conn, str(product["id"]))
+    return {"product": row_json(product), "offers": offers}
 
 
 @app.get("/sellers")
 def list_sellers() -> Dict[str, Any]:
-    return {"sellers": list(SELLERS.values()), "shipping_rules": list(SHIPPING_RULES.values())}
+    with db() as conn:
+        sellers = conn.execute(
+            "select id, name, support_email, commission_rate, created_at from sellers order by name"
+        ).fetchall()
+        shipping_rules = conn.execute(
+            "select id, seller_id, base_shipping_cents, free_shipping_threshold_cents, created_at from shipping_rules"
+        ).fetchall()
+    return {"sellers": [seller_response(row) for row in sellers], "shipping_rules": rows_json(shipping_rules)}
 
 
 @app.post("/seller/offers")
 def update_seller_offer(payload: SellerOfferUpdateRequest) -> Dict[str, Any]:
-    if payload.seller_id not in SELLERS:
-        raise HTTPException(status_code=404, detail="Seller not found")
-    if payload.product_id not in PRODUCTS:
-        raise HTTPException(status_code=404, detail="Product not found")
+    with db() as conn:
+        if not conn.execute("select id from sellers where id=%s", (payload.seller_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Seller not found")
+        if not conn.execute("select id from products where id=%s", (payload.product_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Product not found")
+        data = payload.model_dump()
+        row = conn.execute(
+            """
+            insert into seller_products (seller_id, product_id, price_cents, stock_quantity, delivery_days_min, delivery_days_max)
+            values (%s, %s, %s, %s, %s, %s)
+            on conflict (seller_id, product_id)
+            do update set price_cents=excluded.price_cents,
+                          stock_quantity=excluded.stock_quantity,
+                          delivery_days_min=excluded.delivery_days_min,
+                          delivery_days_max=excluded.delivery_days_max
+            returning id, seller_id, product_id, price_cents, stock_quantity, delivery_days_min, delivery_days_max
+            """,
+            (
+                data["seller_id"],
+                data["product_id"],
+                data["price_cents"],
+                data.get("stock_quantity", 0),
+                data.get("delivery_days_min", 1),
+                data.get("delivery_days_max", 3),
+            ),
+        ).fetchone()
+    return {"offer": row_json(row)}
 
-    for offer in OFFERS:
-        if offer["seller_id"] == payload.seller_id and offer["product_id"] == payload.product_id:
-            offer.update(payload.model_dump())
-            return {"offer": offer}
 
-    offer = {
-        "id": uid("offer"),
-        **payload.model_dump(),
-    }
-    OFFERS.append(offer)
-    return {"offer": offer}
+def ensure_user(conn, user_id: str):
+    user = conn.execute("select id, email, full_name from app_users where id=%s", (user_id,)).fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def ensure_active_cart(conn, user_id: str):
+    cart = conn.execute(
+        """
+        select id, user_id, status from carts
+        where user_id=%s and status='active'
+        order by created_at desc limit 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if cart:
+        return cart
+    return conn.execute(
+        "insert into carts (user_id, status) values (%s, 'active') returning id, user_id, status",
+        (user_id,),
+    ).fetchone()
 
 
 @app.post("/scan")
 def scan(payload: ScanRequest) -> Dict[str, Any]:
-    if payload.user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    product = get_product_by_gtin(payload.gtin)
-    if not product:
-        raise HTTPException(status_code=404, detail="Barcode not found in catalog")
-
-    cart = CARTS.setdefault(payload.user_id, {})
-    cart[product["id"]] = cart.get(product["id"], 0) + payload.quantity
-    return {"product": product, "cart": _cart_response(payload.user_id)}
+    with db() as conn:
+        ensure_user(conn, payload.user_id)
+        product = get_product_by_gtin(conn, payload.gtin)
+        if not product:
+            raise HTTPException(status_code=404, detail="Barcode not found in catalog")
+        cart = ensure_active_cart(conn, payload.user_id)
+        conn.execute(
+            """
+            insert into cart_items (cart_id, product_id, quantity)
+            values (%s, %s, %s)
+            on conflict (cart_id, product_id)
+            do update set quantity = cart_items.quantity + excluded.quantity
+            """,
+            (cart["id"], product["id"], payload.quantity),
+        )
+        cart_data = cart_response(conn, payload.user_id)
+    return {"product": row_json(product), "cart": cart_data}
 
 
 @app.get("/cart/{user_id}")
 def get_cart(user_id: str) -> Dict[str, Any]:
-    if user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    return _cart_response(user_id)
+    with db() as conn:
+        ensure_user(conn, user_id)
+        return cart_response(conn, user_id)
 
 
-def _cart_response(user_id: str) -> Dict[str, Any]:
-    cart = CARTS.setdefault(user_id, {})
+def cart_response(conn, user_id: str) -> Dict[str, Any]:
+    cart = ensure_active_cart(conn, user_id)
+    rows = conn.execute(
+        """
+        select ci.quantity, p.id as product_id, p.gtin, p.name, p.brand, p.image_url, p.category,
+               (select min(sp.price_cents) from seller_products sp where sp.product_id=p.id and sp.stock_quantity >= ci.quantity) as min_price_cents
+        from cart_items ci
+        join products p on p.id = ci.product_id
+        where ci.cart_id=%s
+        order by ci.created_at
+        """,
+        (cart["id"],),
+    ).fetchall()
     items = []
-    for product_id, quantity in cart.items():
-        product = PRODUCTS[product_id]
-        min_price = min((o["price_cents"] for o in OFFERS if o["product_id"] == product_id and o["stock_quantity"] >= quantity), default=None)
-        items.append({"product": product, "quantity": quantity, "min_price_cents": min_price})
-    return {"user_id": user_id, "items": items}
+    for row in rows_json(rows):
+        items.append({
+            "product": {
+                "id": row["product_id"],
+                "gtin": row["gtin"],
+                "name": row["name"],
+                "brand": row["brand"],
+                "image_url": row["image_url"],
+                "category": row["category"],
+            },
+            "quantity": row["quantity"],
+            "min_price_cents": row["min_price_cents"],
+        })
+    return {"user_id": str(user_id), "items": items}
 
 
 @app.post("/cart/items")
 def update_cart_item(payload: CartItemUpdateRequest) -> Dict[str, Any]:
-    if payload.user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    if payload.product_id not in PRODUCTS:
-        raise HTTPException(status_code=404, detail="Product not found")
-    cart = CARTS.setdefault(payload.user_id, {})
-    if payload.quantity <= 0:
-        cart.pop(payload.product_id, None)
-    else:
-        cart[payload.product_id] = payload.quantity
-    return _cart_response(payload.user_id)
+    with db() as conn:
+        ensure_user(conn, payload.user_id)
+        if not get_product_by_id(conn, payload.product_id):
+            raise HTTPException(status_code=404, detail="Product not found")
+        cart = ensure_active_cart(conn, payload.user_id)
+        if payload.quantity <= 0:
+            conn.execute("delete from cart_items where cart_id=%s and product_id=%s", (cart["id"], payload.product_id))
+        else:
+            conn.execute(
+                """
+                insert into cart_items (cart_id, product_id, quantity)
+                values (%s, %s, %s)
+                on conflict (cart_id, product_id)
+                do update set quantity = excluded.quantity
+                """,
+                (cart["id"], payload.product_id, payload.quantity),
+            )
+        return cart_response(conn, payload.user_id)
+
+
+def get_shipping_rule(conn, seller_id: str) -> dict:
+    rule = conn.execute(
+        """
+        select base_shipping_cents, free_shipping_threshold_cents
+        from shipping_rules where seller_id=%s
+        order by created_at desc limit 1
+        """,
+        (seller_id,),
+    ).fetchone()
+    return row_json(rule) if rule else {"base_shipping_cents": 495, "free_shipping_threshold_cents": None}
+
+
+def cart_rows_for_optimization(conn, user_id: str) -> list[dict]:
+    cart = ensure_active_cart(conn, user_id)
+    rows = conn.execute(
+        """
+        select ci.quantity, p.id, p.gtin, p.name, p.brand, p.image_url, p.category
+        from cart_items ci
+        join products p on p.id = ci.product_id
+        where ci.cart_id=%s
+        order by ci.created_at
+        """,
+        (cart["id"],),
+    ).fetchall()
+    return rows_json(rows)
+
+
+def calculate_optimization(conn, user_id: str) -> dict:
+    cart_items = cart_rows_for_optimization(conn, user_id)
+    if not cart_items:
+        raise ValueError("Cart is empty")
+    choices = []
+    for item in cart_items:
+        offers = get_offers_for_product(conn, item["id"], item["quantity"])
+        if not offers:
+            raise ValueError(f"No available offers for {item['name']}")
+        choices.append([(item, offer) for offer in offers])
+
+    best = None
+    for combination in cartesian_product(*choices):
+        seller_groups = {}
+        products_cents = 0
+        for cart_item, offer in combination:
+            seller = offer["seller"]
+            seller_id = seller["id"]
+            qty = cart_item["quantity"]
+            line_total = offer["price_cents"] * qty
+            products_cents += line_total
+            seller_groups.setdefault(seller_id, {
+                "seller": seller,
+                "items": [],
+                "subtotal_cents": 0,
+                "delivery_days_max": 0,
+                "carrier": "PostNL",
+            })
+            group = seller_groups[seller_id]
+            group["items"].append({
+                "product": {
+                    "id": cart_item["id"],
+                    "gtin": cart_item["gtin"],
+                    "name": cart_item["name"],
+                    "brand": cart_item.get("brand"),
+                    "image_url": cart_item.get("image_url"),
+                    "category": cart_item.get("category"),
+                },
+                "quantity": qty,
+                "unit_price_cents": offer["price_cents"],
+                "line_total_cents": line_total,
+            })
+            group["subtotal_cents"] += line_total
+            group["delivery_days_max"] = max(group["delivery_days_max"], offer.get("delivery_days_max") or 3)
+
+        shipping_cents = 0
+        seller_lines = []
+        for seller_id, line in seller_groups.items():
+            rule = get_shipping_rule(conn, seller_id)
+            threshold = rule.get("free_shipping_threshold_cents")
+            base = rule.get("base_shipping_cents") or 0
+            seller_shipping = 0 if threshold and line["subtotal_cents"] >= threshold else base
+            shipping_cents += seller_shipping
+            seller_lines.append({**line, "shipping_cents": seller_shipping})
+        total_cents = products_cents + shipping_cents
+        if best is None or total_cents < best["total_cents"]:
+            best = {
+                "id": str(uuid4()),
+                "products_cents": products_cents,
+                "shipping_cents": shipping_cents,
+                "total_cents": total_cents,
+                "seller_lines": seller_lines,
+            }
+    return best
 
 
 @app.post("/cart/{user_id}/optimize")
 def optimize(user_id: str) -> Dict[str, Any]:
-    if user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    try:
-        result = optimize_cart(CARTS.setdefault(user_id, {}))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    OPTIMIZATIONS[result["id"]] = {**result, "user_id": user_id}
+    with db() as conn:
+        ensure_user(conn, user_id)
+        try:
+            result = calculate_optimization(conn, user_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.execute(
+            "insert into cart_optimizations (id, user_id, result_json) values (%s, %s, %s)",
+            (result["id"], user_id, jsonable(result)),
+        )
     return {"optimization": result}
 
 
 @app.post("/checkout")
 def checkout(payload: CheckoutRequest) -> Dict[str, Any]:
-    if payload.user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    optimization = OPTIMIZATIONS.get(payload.optimization_id)
-    if not optimization or optimization["user_id"] != payload.user_id:
-        raise HTTPException(status_code=404, detail="Optimization not found")
+    with db() as conn:
+        ensure_user(conn, payload.user_id)
+        optimization_row = conn.execute(
+            "select id, result_json from cart_optimizations where id=%s and user_id=%s",
+            (payload.optimization_id, payload.user_id),
+        ).fetchone()
+        if not optimization_row:
+            raise HTTPException(status_code=404, detail="Optimization not found")
+        optimization = optimization_row["result_json"]
+        payment = authorize_mock_payment(optimization["total_cents"], payload.user_id)
+        capture = capture_mock_payment(payment["payment_intent_id"])
+        order = conn.execute(
+            """
+            insert into orders (user_id, total_cents, payment_status, order_status)
+            values (%s, %s, %s, 'accepted')
+            returning id, user_id, total_cents, payment_status, order_status, created_at
+            """,
+            (payload.user_id, optimization["total_cents"], capture["status"]),
+        ).fetchone()
+        order_response = row_json(order)
+        order_response["payment_provider"] = payment["provider"]
+        order_response["payment_intent_id"] = payment["payment_intent_id"]
+        order_response["products_cents"] = optimization["products_cents"]
+        order_response["shipping_cents"] = optimization["shipping_cents"]
+        order_response["suborders"] = []
 
-    payment = authorize_mock_payment(optimization["total_cents"], payload.user_id)
-    capture = capture_mock_payment(payment["payment_intent_id"])
-
-    order_id = uid("ord")
-    order = {
-        "id": order_id,
-        "user_id": payload.user_id,
-        "payment_provider": payment["provider"],
-        "payment_intent_id": payment["payment_intent_id"],
-        "payment_status": capture["status"],
-        "order_status": "accepted",
-        "total_cents": optimization["total_cents"],
-        "products_cents": optimization["products_cents"],
-        "shipping_cents": optimization["shipping_cents"],
-        "suborders": [],
-    }
-
-    for line in optimization["seller_lines"]:
-        seller = line["seller"]
-        platform_fee_cents = calculate_platform_fee(line["subtotal_cents"], seller["commission_rate"])
-        seller_payout_cents = line["subtotal_cents"] + line["shipping_cents"] - platform_fee_cents
-        suborder_id = uid("sub")
-        suborder = {
-            "id": suborder_id,
-            "order_id": order_id,
-            "seller": seller,
-            "items": line["items"],
-            "subtotal_cents": line["subtotal_cents"],
-            "shipping_cents": line["shipping_cents"],
-            "platform_fee_cents": platform_fee_cents,
-            "seller_payout_cents": seller_payout_cents,
-            "status": "accepted",
-            "carrier": line["carrier"],
-            "delivery_days_max": line["delivery_days_max"],
-        }
-        order["suborders"].append(suborder)
-
-        shipment_id = uid("shp")
-        SHIPMENTS[shipment_id] = {
-            "id": shipment_id,
-            "user_id": payload.user_id,
-            "order_id": order_id,
-            "suborder_id": suborder_id,
-            "seller_id": seller["id"],
-            "seller_name": seller["company_name"],
-            "carrier": line["carrier"],
-            "tracking_code": f"MOCK{uuid4().hex[:10].upper()}",
-            "description": ", ".join(item["product"]["name"] for item in line["items"]),
-            "status": "preparing",
-            "eta": eta_from_days(line["delivery_days_max"]),
-        }
-
-    ORDERS[order_id] = order
-    CARTS[payload.user_id] = {}
-    return {"order": order, "shipments": _shipments_for_user(payload.user_id)}
+        for line in optimization["seller_lines"]:
+            seller = line["seller"]
+            platform_fee_cents = calculate_platform_fee(line["subtotal_cents"], seller.get("commission_rate"))
+            seller_payout_cents = line["subtotal_cents"] + line["shipping_cents"] - platform_fee_cents
+            suborder = conn.execute(
+                """
+                insert into suborders (order_id, seller_id, subtotal_cents, shipping_cents, platform_fee_cents, seller_payout_cents, status)
+                values (%s, %s, %s, %s, %s, %s, 'accepted')
+                returning id, order_id, seller_id, subtotal_cents, shipping_cents, platform_fee_cents, seller_payout_cents, status, created_at
+                """,
+                (order["id"], seller["id"], line["subtotal_cents"], line["shipping_cents"], platform_fee_cents, seller_payout_cents),
+            ).fetchone()
+            suborder_response = row_json(suborder)
+            suborder_response["seller"] = seller
+            suborder_response["items"] = line["items"]
+            suborder_response["carrier"] = line.get("carrier", "PostNL")
+            suborder_response["delivery_days_max"] = line.get("delivery_days_max", 2)
+            order_response["suborders"].append(suborder_response)
+            for item in line["items"]:
+                conn.execute(
+                    "insert into suborder_items (suborder_id, product_id, quantity, unit_price_cents) values (%s, %s, %s, %s)",
+                    (suborder["id"], item["product"]["id"], item["quantity"], item["unit_price_cents"]),
+                )
+            conn.execute(
+                """
+                insert into shipments (user_id, order_id, suborder_id, carrier, tracking_code, description, status, eta)
+                values (%s, %s, %s, %s, %s, %s, 'preparing', %s)
+                """,
+                (
+                    payload.user_id,
+                    order["id"],
+                    suborder["id"],
+                    line.get("carrier", "PostNL"),
+                    f"MOCK{uuid4().hex[:10].upper()}",
+                    ", ".join(item["product"]["name"] for item in line["items"]),
+                    eta_from_days(line.get("delivery_days_max", 2)),
+                ),
+            )
+        cart = ensure_active_cart(conn, payload.user_id)
+        conn.execute("delete from cart_items where cart_id=%s", (cart["id"],))
+        shipments = shipments_for_user(conn, payload.user_id)
+    return {"order": order_response, "shipments": shipments}
 
 
 @app.get("/orders/{user_id}")
 def list_orders(user_id: str) -> Dict[str, Any]:
-    orders = [order for order in ORDERS.values() if order["user_id"] == user_id]
-    return {"orders": orders}
+    with db() as conn:
+        ensure_user(conn, user_id)
+        rows = conn.execute(
+            "select id, user_id, total_cents, payment_status, order_status, created_at from orders where user_id=%s order by created_at desc",
+            (user_id,),
+        ).fetchall()
+    return {"orders": rows_json(rows)}
 
 
 @app.get("/shipments/{user_id}")
 def list_shipments(user_id: str) -> Dict[str, Any]:
-    if user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {"shipments": _shipments_for_user(user_id)}
+    with db() as conn:
+        ensure_user(conn, user_id)
+        shipments = shipments_for_user(conn, user_id)
+    return {"shipments": shipments}
 
 
-def _shipments_for_user(user_id: str):
-    return sorted(
-        [shipment for shipment in SHIPMENTS.values() if shipment["user_id"] == user_id],
-        key=lambda shipment: shipment["eta"] or "9999-12-31",
-    )
+def shipments_for_user(conn, user_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        select sh.id, sh.user_id, sh.order_id, sh.suborder_id, sh.carrier, sh.tracking_code,
+               sh.description, sh.status, sh.eta, sh.created_at,
+               so.seller_id, s.name as seller_name
+        from shipments sh
+        left join suborders so on so.id = sh.suborder_id
+        left join sellers s on s.id = so.seller_id
+        where sh.user_id=%s
+        order by coalesce(sh.eta, '9999-12-31') asc, sh.created_at desc
+        """,
+        (user_id,),
+    ).fetchall()
+    return rows_json(rows)
 
 
 @app.post("/shipments/manual")
 def add_manual_shipment(payload: ManualShipmentRequest) -> Dict[str, Any]:
-    if payload.user_id not in USERS:
-        raise HTTPException(status_code=404, detail="User not found")
-    shipment_id = uid("shp")
-    SHIPMENTS[shipment_id] = {
-        "id": shipment_id,
-        "user_id": payload.user_id,
-        "order_id": None,
-        "suborder_id": None,
-        "seller_id": None,
-        "seller_name": None,
-        "carrier": payload.carrier,
-        "tracking_code": payload.tracking_code,
-        "description": payload.description,
-        "status": "tracking_added",
-        "eta": payload.eta or (date.today() + timedelta(days=2)).isoformat(),
-    }
-    return {"shipment": SHIPMENTS[shipment_id], "shipments": _shipments_for_user(payload.user_id)}
+    with db() as conn:
+        ensure_user(conn, payload.user_id)
+        shipment = conn.execute(
+            """
+            insert into shipments (user_id, carrier, tracking_code, description, status, eta)
+            values (%s, %s, %s, %s, 'tracking_added', %s)
+            returning id, user_id, order_id, suborder_id, carrier, tracking_code, description, status, eta, created_at
+            """,
+            (payload.user_id, payload.carrier, payload.tracking_code, payload.description, payload.eta or eta_from_days(2)),
+        ).fetchone()
+        shipments = shipments_for_user(conn, payload.user_id)
+    return {"shipment": row_json(shipment), "shipments": shipments}
