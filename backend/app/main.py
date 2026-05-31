@@ -5,29 +5,25 @@ from decimal import Decimal
 from itertools import product as cartesian_product
 import os
 from typing import Any, Dict
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
 import psycopg
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
-from .payments import authorize_mock_payment, capture_mock_payment
-from .schemas import (
-    CartItemUpdateRequest,
-    CheckoutRequest,
-    ManualShipmentRequest,
-    ScanRequest,
-    SellerOfferUpdateRequest,
-)
+from .schemas import CartItemUpdateRequest, ManualShipmentRequest, ScanRequest
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-app = FastAPI(title="Scan Marketplace API", version="0.3.0")
+app = FastAPI(title="Scan Affiliate API", version="0.4.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -76,28 +72,6 @@ def eta_from_days(days: int | None) -> str:
     return (date.today() + timedelta(days=days or 2)).isoformat()
 
 
-def calculate_platform_fee(subtotal_cents: int, commission_rate: float | Decimal | None) -> int:
-    return round(subtotal_cents * float(commission_rate or 0) / 100)
-
-
-def seller_response(row: dict) -> dict:
-    seller = row_json(row)
-    seller["company_name"] = seller.get("name")
-    return seller
-
-
-def offer_response(row: dict) -> dict:
-    offer = row_json(row)
-    offer["seller"] = {
-        "id": offer["seller_id"],
-        "name": offer["seller_name"],
-        "company_name": offer["seller_name"],
-        "commission_rate": offer.get("commission_rate"),
-        "support_email": offer.get("support_email"),
-    }
-    return offer
-
-
 def require_auth(authorization: str | None = Header(default=None)) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
@@ -108,10 +82,7 @@ def require_auth(authorization: str | None = Header(default=None)) -> dict:
     try:
         response = httpx.get(
             f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": SUPABASE_ANON_KEY,
-            },
+            headers={"Authorization": f"Bearer {access_token}", "apikey": SUPABASE_ANON_KEY},
             timeout=10.0,
         )
     except httpx.RequestError as exc:
@@ -139,9 +110,9 @@ def ensure_user_profile(conn, auth_user: dict):
         """
         insert into app_users (id, email, full_name, password_hash)
         values (%s, %s, %s, null)
-        on conflict (id)
-        do update set email=excluded.email,
-                      full_name=coalesce(excluded.full_name, app_users.full_name)
+        on conflict (id) do update
+          set email=excluded.email,
+              full_name=coalesce(excluded.full_name, app_users.full_name)
         returning id, email, full_name
         """,
         (auth_user["id"], auth_user.get("email"), auth_user.get("full_name")),
@@ -152,14 +123,14 @@ def ensure_user_profile(conn, auth_user: dict):
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "mode": "affiliate"}
 
 
 @app.get("/auth/me")
 def me(auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
     with db() as conn:
         user = ensure_user_profile(conn, auth_user)
-    return {"user": public_user(user)}
+        return {"user": public_user(user)}
 
 
 @app.get("/products")
@@ -168,7 +139,7 @@ def list_products() -> Dict[str, Any]:
         products = conn.execute(
             "select id, gtin, name, brand, image_url, category, created_at from products order by name"
         ).fetchall()
-    return {"products": rows_json(products)}
+        return {"products": rows_json(products)}
 
 
 def get_product_by_gtin(conn, gtin: str):
@@ -185,18 +156,61 @@ def get_product_by_id(conn, product_id: str):
     ).fetchone()
 
 
-def get_offers_for_product(conn, product_id: str, quantity: int = 1) -> list[dict]:
+def merchant_from_offer(offer: dict) -> dict:
+    return {
+        "id": offer["merchant_id"],
+        "name": offer["merchant_name"],
+        "company_name": offer["merchant_name"],
+        "domain": offer.get("domain"),
+        "affiliate_network": offer.get("affiliate_network"),
+        "affiliate_program_id": offer.get("affiliate_program_id"),
+        "logo_url": offer.get("logo_url"),
+    }
+
+
+def offer_response(row: dict) -> dict:
+    offer = row_json(row)
+    offer["merchant"] = merchant_from_offer(offer)
+    # Backward-compatible alias for older screens/debug output.
+    offer["seller"] = offer["merchant"]
+    return offer
+
+
+def get_offers_for_product(conn, product_id: str) -> list[dict]:
     rows = conn.execute(
         """
-        select sp.id, sp.seller_id, sp.product_id, sp.price_cents, sp.stock_quantity,
-               sp.delivery_days_min, sp.delivery_days_max,
-               s.name as seller_name, s.support_email, s.commission_rate
-        from seller_products sp
-        join sellers s on s.id = sp.seller_id
-        where sp.product_id = %s and sp.stock_quantity >= %s
-        order by sp.price_cents asc
+        select
+          ao.id,
+          ao.merchant_id,
+          ao.product_id,
+          ao.gtin,
+          ao.merchant_sku,
+          ao.title,
+          ao.price_cents,
+          ao.old_price_cents,
+          ao.currency,
+          ao.availability,
+          ao.stock_status,
+          ao.product_url,
+          ao.affiliate_url,
+          ao.image_url,
+          ao.delivery_days_min,
+          ao.delivery_days_max,
+          ao.last_seen_at,
+          m.name as merchant_name,
+          m.domain,
+          m.affiliate_network,
+          m.affiliate_program_id,
+          m.logo_url
+        from affiliate_offers ao
+        join merchants m on m.id = ao.merchant_id
+        where ao.product_id = %s
+          and ao.active = true
+          and m.active = true
+          and lower(coalesce(ao.availability, 'in_stock')) in ('in_stock', 'available', 'op voorraad')
+        order by ao.price_cents asc
         """,
-        (product_id, quantity),
+        (product_id,),
     ).fetchall()
     return [offer_response(row) for row in rows]
 
@@ -208,59 +222,40 @@ def product_by_gtin(gtin: str) -> Dict[str, Any]:
         if not product:
             raise HTTPException(status_code=404, detail="Unknown barcode")
         offers = get_offers_for_product(conn, str(product["id"]))
-    return {"product": row_json(product), "offers": offers}
+        return {"product": row_json(product), "offers": offers}
 
 
-@app.get("/sellers")
-def list_sellers() -> Dict[str, Any]:
+@app.get("/merchants")
+def list_merchants() -> Dict[str, Any]:
     with db() as conn:
-        sellers = conn.execute(
-            "select id, name, support_email, commission_rate, created_at from sellers order by name"
+        merchants = conn.execute(
+            "select id, name, domain, affiliate_network, affiliate_program_id, logo_url, active from merchants order by name"
         ).fetchall()
         shipping_rules = conn.execute(
-            "select id, seller_id, base_shipping_cents, free_shipping_threshold_cents, created_at from shipping_rules"
-        ).fetchall()
-    return {"sellers": [seller_response(row) for row in sellers], "shipping_rules": rows_json(shipping_rules)}
-
-
-@app.post("/seller/offers")
-def update_seller_offer(payload: SellerOfferUpdateRequest) -> Dict[str, Any]:
-    # MVP: still unauthenticated. Later, restrict this to seller/admin accounts.
-    with db() as conn:
-        if not conn.execute("select id from sellers where id=%s", (payload.seller_id,)).fetchone():
-            raise HTTPException(status_code=404, detail="Seller not found")
-        if not conn.execute("select id from products where id=%s", (payload.product_id,)).fetchone():
-            raise HTTPException(status_code=404, detail="Product not found")
-        data = payload.model_dump()
-        row = conn.execute(
             """
-            insert into seller_products (seller_id, product_id, price_cents, stock_quantity, delivery_days_min, delivery_days_max)
-            values (%s, %s, %s, %s, %s, %s)
-            on conflict (seller_id, product_id)
-            do update set price_cents=excluded.price_cents,
-                          stock_quantity=excluded.stock_quantity,
-                          delivery_days_min=excluded.delivery_days_min,
-                          delivery_days_max=excluded.delivery_days_max
-            returning id, seller_id, product_id, price_cents, stock_quantity, delivery_days_min, delivery_days_max
-            """,
-            (
-                data["seller_id"],
-                data["product_id"],
-                data["price_cents"],
-                data.get("stock_quantity", 0),
-                data.get("delivery_days_min", 1),
-                data.get("delivery_days_max", 3),
-            ),
-        ).fetchone()
-    return {"offer": row_json(row)}
+            select id, merchant_id, country, base_shipping_cents, free_shipping_threshold_cents,
+                   delivery_days_min, delivery_days_max, notes, last_checked_at
+            from affiliate_shipping_rules
+            """
+        ).fetchall()
+        return {"merchants": rows_json(merchants), "shipping_rules": rows_json(shipping_rules)}
+
+
+# Backward-compatible endpoint name.
+@app.get("/sellers")
+def list_sellers() -> Dict[str, Any]:
+    data = list_merchants()
+    return {"sellers": data["merchants"], "shipping_rules": data["shipping_rules"]}
 
 
 def ensure_active_cart(conn, user_id: str):
     cart = conn.execute(
         """
-        select id, user_id, status from carts
+        select id, user_id, status
+        from carts
         where user_id=%s and status='active'
-        order by created_at desc limit 1
+        order by created_at desc
+        limit 1
         """,
         (user_id,),
     ).fetchone()
@@ -285,13 +280,12 @@ def scan(payload: ScanRequest, auth_user: dict = Depends(require_auth)) -> Dict[
             """
             insert into cart_items (cart_id, product_id, quantity)
             values (%s, %s, %s)
-            on conflict (cart_id, product_id)
-            do update set quantity = cart_items.quantity + excluded.quantity
+            on conflict (cart_id, product_id) do update
+              set quantity = cart_items.quantity + excluded.quantity
             """,
             (cart["id"], product["id"], payload.quantity),
         )
-        cart_data = cart_response(conn, payload.user_id)
-    return {"product": row_json(product), "cart": cart_data}
+        return {"product": row_json(product), "cart": cart_response(conn, payload.user_id)}
 
 
 @app.get("/cart/{user_id}")
@@ -306,8 +300,20 @@ def cart_response(conn, user_id: str) -> Dict[str, Any]:
     cart = ensure_active_cart(conn, user_id)
     rows = conn.execute(
         """
-        select ci.quantity, p.id as product_id, p.gtin, p.name, p.brand, p.image_url, p.category,
-               (select min(sp.price_cents) from seller_products sp where sp.product_id=p.id and sp.stock_quantity >= ci.quantity) as min_price_cents
+        select
+          ci.quantity,
+          p.id as product_id,
+          p.gtin,
+          p.name,
+          p.brand,
+          p.image_url,
+          p.category,
+          (
+            select min(ao.price_cents)
+            from affiliate_offers ao
+            join merchants m on m.id = ao.merchant_id
+            where ao.product_id=p.id and ao.active=true and m.active=true
+          ) as min_price_cents
         from cart_items ci
         join products p on p.id = ci.product_id
         where ci.cart_id=%s
@@ -317,18 +323,20 @@ def cart_response(conn, user_id: str) -> Dict[str, Any]:
     ).fetchall()
     items = []
     for row in rows_json(rows):
-        items.append({
-            "product": {
-                "id": row["product_id"],
-                "gtin": row["gtin"],
-                "name": row["name"],
-                "brand": row["brand"],
-                "image_url": row["image_url"],
-                "category": row["category"],
-            },
-            "quantity": row["quantity"],
-            "min_price_cents": row["min_price_cents"],
-        })
+        items.append(
+            {
+                "product": {
+                    "id": row["product_id"],
+                    "gtin": row["gtin"],
+                    "name": row["name"],
+                    "brand": row["brand"],
+                    "image_url": row["image_url"],
+                    "category": row["category"],
+                },
+                "quantity": row["quantity"],
+                "min_price_cents": row["min_price_cents"],
+            }
+        )
     return {"user_id": str(user_id), "items": items}
 
 
@@ -347,24 +355,97 @@ def update_cart_item(payload: CartItemUpdateRequest, auth_user: dict = Depends(r
                 """
                 insert into cart_items (cart_id, product_id, quantity)
                 values (%s, %s, %s)
-                on conflict (cart_id, product_id)
-                do update set quantity = excluded.quantity
+                on conflict (cart_id, product_id) do update set quantity = excluded.quantity
                 """,
                 (cart["id"], payload.product_id, payload.quantity),
             )
         return cart_response(conn, payload.user_id)
 
 
-def get_shipping_rule(conn, seller_id: str) -> dict:
+def get_shipping_rule(conn, merchant_id: str) -> dict:
     rule = conn.execute(
         """
-        select base_shipping_cents, free_shipping_threshold_cents
-        from shipping_rules where seller_id=%s
-        order by created_at desc limit 1
+        select base_shipping_cents, free_shipping_threshold_cents, delivery_days_min, delivery_days_max
+        from affiliate_shipping_rules
+        where merchant_id=%s and country='NL'
+        order by last_checked_at desc, created_at desc
+        limit 1
         """,
-        (seller_id,),
+        (merchant_id,),
     ).fetchone()
     return row_json(rule) if rule else {"base_shipping_cents": 495, "free_shipping_threshold_cents": None}
+
+
+def active_promotions_for_line(conn, merchant_id: str, product_id: str, gtin: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        select id, promotion_type, title, conditions_json, reward_json, affiliate_url
+        from affiliate_promotions
+        where merchant_id=%s
+          and active=true
+          and (product_id=%s or gtin=%s or (product_id is null and gtin is null))
+          and (starts_at is null or starts_at <= now())
+          and (ends_at is null or ends_at >= now())
+        order by created_at desc
+        """,
+        (merchant_id, product_id, gtin),
+    ).fetchall()
+    return rows_json(rows)
+
+
+def calculate_line_with_promotions(quantity: int, unit_price_cents: int, promotions: list[dict]) -> dict:
+    subtotal = quantity * unit_price_cents
+    best_discount = 0
+    applied: list[dict] = []
+
+    for promo in promotions:
+        conditions = promo.get("conditions_json") or {}
+        reward = promo.get("reward_json") or {}
+        min_quantity = int(conditions.get("min_quantity", 1) or 1)
+        if quantity < min_quantity:
+            continue
+
+        discount = 0
+        promo_type = promo.get("promotion_type")
+
+        if promo_type == "percentage_off":
+            percentage = float(reward.get("percentage", 0) or 0)
+            discount = round(subtotal * percentage / 100)
+        elif promo_type == "amount_off":
+            amount = int(reward.get("amount_cents", 0) or 0)
+            discount = min(subtotal, amount * quantity)
+        elif promo_type == "fixed_price":
+            fixed_price = int(reward.get("fixed_price_cents", unit_price_cents) or unit_price_cents)
+            discount = max(0, subtotal - fixed_price * quantity)
+        elif promo_type == "buy_x_get_y_free":
+            buy_qty = int(conditions.get("buy_quantity", 0) or 0)
+            free_qty = int(conditions.get("free_quantity", 0) or 0)
+            cycle = buy_qty + free_qty
+            if buy_qty > 0 and free_qty > 0 and cycle > 0:
+                full_cycles = quantity // cycle
+                remainder = quantity % cycle
+                free_units = full_cycles * free_qty + max(0, remainder - buy_qty)
+                discount = min(quantity, free_units) * unit_price_cents
+        elif promo_type == "bundle_price":
+            bundle_qty = int(conditions.get("bundle_quantity", 0) or 0)
+            bundle_price = int(reward.get("bundle_price_cents", 0) or 0)
+            if bundle_qty > 0 and bundle_price > 0:
+                bundles = quantity // bundle_qty
+                remainder = quantity % bundle_qty
+                normal = quantity * unit_price_cents
+                bundled = bundles * bundle_price + remainder * unit_price_cents
+                discount = max(0, normal - bundled)
+
+        if discount > best_discount:
+            best_discount = discount
+            applied = [{"id": promo.get("id"), "title": promo.get("title"), "promotion_type": promo_type}]
+
+    return {
+        "line_subtotal_cents": subtotal,
+        "discount_cents": best_discount,
+        "line_total_cents": max(0, subtotal - best_discount),
+        "applied_promotions": applied,
+    }
 
 
 def cart_rows_for_optimization(conn, user_id: str) -> list[dict]:
@@ -386,65 +467,107 @@ def calculate_optimization(conn, user_id: str) -> dict:
     cart_items = cart_rows_for_optimization(conn, user_id)
     if not cart_items:
         raise ValueError("Cart is empty")
+
     choices = []
     for item in cart_items:
-        offers = get_offers_for_product(conn, item["id"], item["quantity"])
+        offers = get_offers_for_product(conn, item["id"])
         if not offers:
-            raise ValueError(f"No available offers for {item['name']}")
+            raise ValueError(f"No affiliate offers available for {item['name']}")
         choices.append([(item, offer) for offer in offers])
 
     best = None
     for combination in cartesian_product(*choices):
-        seller_groups = {}
-        products_cents = 0
+        merchant_groups: dict[str, dict] = {}
+        products_before_discount_cents = 0
+        promotion_discount_cents = 0
+        products_after_discount_cents = 0
+
         for cart_item, offer in combination:
-            seller = offer["seller"]
-            seller_id = seller["id"]
-            qty = cart_item["quantity"]
-            line_total = offer["price_cents"] * qty
-            products_cents += line_total
-            seller_groups.setdefault(seller_id, {
-                "seller": seller,
-                "items": [],
-                "subtotal_cents": 0,
-                "delivery_days_max": 0,
-                "carrier": "PostNL",
-            })
-            group = seller_groups[seller_id]
-            group["items"].append({
-                "product": {
-                    "id": cart_item["id"],
-                    "gtin": cart_item["gtin"],
-                    "name": cart_item["name"],
-                    "brand": cart_item.get("brand"),
-                    "image_url": cart_item.get("image_url"),
-                    "category": cart_item.get("category"),
+            merchant = offer["merchant"]
+            merchant_id = merchant["id"]
+            quantity = cart_item["quantity"]
+            promotions = active_promotions_for_line(conn, merchant_id, cart_item["id"], cart_item["gtin"])
+            price_result = calculate_line_with_promotions(quantity, offer["price_cents"], promotions)
+
+            products_before_discount_cents += price_result["line_subtotal_cents"]
+            promotion_discount_cents += price_result["discount_cents"]
+            products_after_discount_cents += price_result["line_total_cents"]
+
+            group = merchant_groups.setdefault(
+                merchant_id,
+                {
+                    "merchant": merchant,
+                    "items": [],
+                    "product_subtotal_cents": 0,
+                    "promotion_discount_cents": 0,
+                    "subtotal_cents": 0,
+                    "delivery_days_max": 0,
                 },
-                "quantity": qty,
-                "unit_price_cents": offer["price_cents"],
-                "line_total_cents": line_total,
-            })
-            group["subtotal_cents"] += line_total
+            )
+            group["items"].append(
+                {
+                    "product": {
+                        "id": cart_item["id"],
+                        "gtin": cart_item["gtin"],
+                        "name": cart_item["name"],
+                        "brand": cart_item.get("brand"),
+                        "image_url": cart_item.get("image_url"),
+                        "category": cart_item.get("category"),
+                    },
+                    "quantity": quantity,
+                    "unit_price_cents": offer["price_cents"],
+                    "line_subtotal_cents": price_result["line_subtotal_cents"],
+                    "discount_cents": price_result["discount_cents"],
+                    "line_total_cents": price_result["line_total_cents"],
+                    "applied_promotions": price_result["applied_promotions"],
+                    "product_url": offer["product_url"],
+                    "affiliate_url": offer["affiliate_url"],
+                }
+            )
+            group["product_subtotal_cents"] += price_result["line_subtotal_cents"]
+            group["promotion_discount_cents"] += price_result["discount_cents"]
+            group["subtotal_cents"] += price_result["line_total_cents"]
             group["delivery_days_max"] = max(group["delivery_days_max"], offer.get("delivery_days_max") or 3)
 
         shipping_cents = 0
-        seller_lines = []
-        for seller_id, line in seller_groups.items():
-            rule = get_shipping_rule(conn, seller_id)
+        merchant_lines = []
+        for merchant_id, line in merchant_groups.items():
+            rule = get_shipping_rule(conn, merchant_id)
             threshold = rule.get("free_shipping_threshold_cents")
             base = rule.get("base_shipping_cents") or 0
-            seller_shipping = 0 if threshold and line["subtotal_cents"] >= threshold else base
-            shipping_cents += seller_shipping
-            seller_lines.append({**line, "shipping_cents": seller_shipping})
-        total_cents = products_cents + shipping_cents
+            merchant_shipping = 0 if threshold and line["subtotal_cents"] >= threshold else base
+            shipping_cents += merchant_shipping
+            line_total = line["subtotal_cents"] + merchant_shipping
+            merchant_lines.append(
+                {
+                    **line,
+                    "shipping_cents": merchant_shipping,
+                    "total_cents": line_total,
+                    "carrier": "PostNL",
+                    "redirect_path": None,  # filled after optimization id is created
+                }
+            )
+
+        total_cents = products_after_discount_cents + shipping_cents
         if best is None or total_cents < best["total_cents"]:
             best = {
                 "id": str(uuid4()),
-                "products_cents": products_cents,
+                "checkout_mode": "affiliate_redirects",
+                "products_cents": products_after_discount_cents,
+                "products_before_discount_cents": products_before_discount_cents,
+                "promotion_discount_cents": promotion_discount_cents,
                 "shipping_cents": shipping_cents,
                 "total_cents": total_cents,
-                "seller_lines": seller_lines,
+                "selected_merchants_count": len(merchant_lines),
+                "selected_sellers_count": len(merchant_lines),  # backward-compatible alias
+                "merchant_lines": merchant_lines,
+                "seller_lines": merchant_lines,  # backward-compatible alias
+                "generated_at": datetime.utcnow().isoformat() + "Z",
             }
+
+    for line in best["merchant_lines"]:
+        line["redirect_path"] = f"/affiliate/redirect/{best['id']}/{line['merchant']['id']}"
+    best["seller_lines"] = best["merchant_lines"]
     return best
 
 
@@ -461,92 +584,66 @@ def optimize(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str,
             "insert into cart_optimizations (id, user_id, result_json) values (%s, %s, %s)",
             (result["id"], user_id, Jsonb(jsonable(result))),
         )
-    return {"optimization": result}
+        return {"optimization": result}
 
 
-@app.post("/checkout")
-def checkout(payload: CheckoutRequest, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
-    assert_same_user(payload.user_id, auth_user)
+def add_tracking_params(url: str, sub_id: str) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("subId", sub_id)
+    query.setdefault("utm_source", "scanner_app")
+    query.setdefault("utm_medium", "affiliate")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+@app.get("/affiliate/redirect/{optimization_id}/{merchant_id}")
+def affiliate_redirect(optimization_id: str, merchant_id: str):
     with db() as conn:
-        ensure_user_profile(conn, auth_user)
         optimization_row = conn.execute(
-            "select id, result_json from cart_optimizations where id=%s and user_id=%s",
-            (payload.optimization_id, payload.user_id),
+            "select user_id, result_json from cart_optimizations where id=%s",
+            (optimization_id,),
         ).fetchone()
         if not optimization_row:
             raise HTTPException(status_code=404, detail="Optimization not found")
-        optimization = optimization_row["result_json"]
-        payment = authorize_mock_payment(optimization["total_cents"], payload.user_id)
-        capture = capture_mock_payment(payment["payment_intent_id"])
-        order = conn.execute(
-            """
-            insert into orders (user_id, total_cents, payment_status, order_status)
-            values (%s, %s, %s, 'accepted')
-            returning id, user_id, total_cents, payment_status, order_status, created_at
-            """,
-            (payload.user_id, optimization["total_cents"], capture["status"]),
-        ).fetchone()
-        order_response = row_json(order)
-        order_response["payment_provider"] = payment["provider"]
-        order_response["payment_intent_id"] = payment["payment_intent_id"]
-        order_response["products_cents"] = optimization["products_cents"]
-        order_response["shipping_cents"] = optimization["shipping_cents"]
-        order_response["suborders"] = []
 
-        for line in optimization["seller_lines"]:
-            seller = line["seller"]
-            platform_fee_cents = calculate_platform_fee(line["subtotal_cents"], seller.get("commission_rate"))
-            seller_payout_cents = line["subtotal_cents"] + line["shipping_cents"] - platform_fee_cents
-            suborder = conn.execute(
-                """
-                insert into suborders (order_id, seller_id, subtotal_cents, shipping_cents, platform_fee_cents, seller_payout_cents, status)
-                values (%s, %s, %s, %s, %s, %s, 'accepted')
-                returning id, order_id, seller_id, subtotal_cents, shipping_cents, platform_fee_cents, seller_payout_cents, status, created_at
-                """,
-                (order["id"], seller["id"], line["subtotal_cents"], line["shipping_cents"], platform_fee_cents, seller_payout_cents),
-            ).fetchone()
-            suborder_response = row_json(suborder)
-            suborder_response["seller"] = seller
-            suborder_response["items"] = line["items"]
-            suborder_response["carrier"] = line.get("carrier", "PostNL")
-            suborder_response["delivery_days_max"] = line.get("delivery_days_max", 2)
-            order_response["suborders"].append(suborder_response)
-            for item in line["items"]:
-                conn.execute(
-                    "insert into suborder_items (suborder_id, product_id, quantity, unit_price_cents) values (%s, %s, %s, %s)",
-                    (suborder["id"], item["product"]["id"], item["quantity"], item["unit_price_cents"]),
-                )
-            conn.execute(
-                """
-                insert into shipments (user_id, order_id, suborder_id, carrier, tracking_code, description, status, eta)
-                values (%s, %s, %s, %s, %s, %s, 'preparing', %s)
-                """,
-                (
-                    payload.user_id,
-                    order["id"],
-                    suborder["id"],
-                    line.get("carrier", "PostNL"),
-                    f"MOCK{uuid4().hex[:10].upper()}",
-                    ", ".join(item["product"]["name"] for item in line["items"]),
-                    eta_from_days(line.get("delivery_days_max", 2)),
-                ),
-            )
-        cart = ensure_active_cart(conn, payload.user_id)
-        conn.execute("delete from cart_items where cart_id=%s", (cart["id"],))
-        shipments = shipments_for_user(conn, payload.user_id)
-    return {"order": order_response, "shipments": shipments}
+        optimization = optimization_row["result_json"]
+        line = next(
+            (line for line in optimization.get("merchant_lines", []) if str(line["merchant"]["id"]) == str(merchant_id)),
+            None,
+        )
+        if not line:
+            raise HTTPException(status_code=404, detail="Merchant not found in optimization")
+
+        # MVP fallback: open the first product's affiliate URL. Later, replace this with merchant-specific cart deeplinks.
+        first_item = line["items"][0]
+        base_url = first_item.get("affiliate_url") or first_item.get("product_url")
+        if not base_url:
+            raise HTTPException(status_code=404, detail="Affiliate URL missing")
+
+        sub_id = f"opt_{optimization_id}_m_{merchant_id}_{uuid4().hex[:8]}"
+        redirect_url = add_tracking_params(base_url, sub_id)
+        conn.execute(
+            """
+            insert into affiliate_clicks (user_id, optimization_id, merchant_id, affiliate_url, sub_id)
+            values (%s, %s, %s, %s, %s)
+            """,
+            (optimization_row["user_id"], optimization_id, merchant_id, redirect_url, sub_id),
+        )
+        return RedirectResponse(redirect_url, status_code=302)
+
+
+@app.post("/checkout")
+def checkout_deprecated() -> Dict[str, Any]:
+    raise HTTPException(
+        status_code=410,
+        detail="Checkout is disabled in affiliate mode. Use merchant redirect links from the optimization result.",
+    )
 
 
 @app.get("/orders/{user_id}")
 def list_orders(user_id: str, auth_user: dict = Depends(require_auth)) -> Dict[str, Any]:
     assert_same_user(user_id, auth_user)
-    with db() as conn:
-        ensure_user_profile(conn, auth_user)
-        rows = conn.execute(
-            "select id, user_id, total_cents, payment_status, order_status, created_at from orders where user_id=%s order by created_at desc",
-            (user_id,),
-        ).fetchall()
-    return {"orders": rows_json(rows)}
+    return {"orders": [], "mode": "affiliate_redirects"}
 
 
 @app.get("/shipments/{user_id}")
@@ -554,21 +651,18 @@ def list_shipments(user_id: str, auth_user: dict = Depends(require_auth)) -> Dic
     assert_same_user(user_id, auth_user)
     with db() as conn:
         ensure_user_profile(conn, auth_user)
-        shipments = shipments_for_user(conn, user_id)
-    return {"shipments": shipments}
+        return {"shipments": shipments_for_user(conn, user_id)}
 
 
 def shipments_for_user(conn, user_id: str) -> list[dict]:
     rows = conn.execute(
         """
-        select sh.id, sh.user_id, sh.order_id, sh.suborder_id, sh.carrier, sh.tracking_code,
-               sh.description, sh.status, sh.eta, sh.created_at,
-               so.seller_id, s.name as seller_name
-        from shipments sh
-        left join suborders so on so.id = sh.suborder_id
-        left join sellers s on s.id = so.seller_id
-        where sh.user_id=%s
-        order by coalesce(sh.eta, '9999-12-31') asc, sh.created_at desc
+        select id, user_id, order_id, suborder_id, carrier, tracking_code, description, status, eta, created_at,
+               null as seller_id,
+               null as seller_name
+        from shipments
+        where user_id=%s
+        order by coalesce(eta, '9999-12-31') asc, created_at desc
         """,
         (user_id,),
     ).fetchall()
@@ -588,5 +682,4 @@ def add_manual_shipment(payload: ManualShipmentRequest, auth_user: dict = Depend
             """,
             (payload.user_id, payload.carrier, payload.tracking_code, payload.description, payload.eta or eta_from_days(2)),
         ).fetchone()
-        shipments = shipments_for_user(conn, payload.user_id)
-    return {"shipment": row_json(shipment), "shipments": shipments}
+        return {"shipment": row_json(shipment), "shipments": shipments_for_user(conn, payload.user_id)}

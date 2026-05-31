@@ -10,7 +10,7 @@ export function setApiAccessToken(token: string | null) {
   accessToken = token;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     headers: {
       'Content-Type': 'application/json',
@@ -34,32 +34,32 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   me: () => request('/auth/me'),
+
   scan: (userId: string, gtin: string, quantity = 1) =>
     request('/scan', {
       method: 'POST',
       body: JSON.stringify({ user_id: userId, gtin, quantity })
     }),
+
   getCart: (userId: string) => request(`/cart/${userId}`),
+
   updateCartItem: (userId: string, productId: string, quantity: number) =>
     request('/cart/items', {
       method: 'POST',
       body: JSON.stringify({ user_id: userId, product_id: productId, quantity })
     }),
+
   optimize: (userId: string) => request(`/cart/${userId}/optimize`, { method: 'POST' }),
-  checkout: (userId: string, optimizationId: string) =>
-    request('/checkout', {
-      method: 'POST',
-      body: JSON.stringify({ user_id: userId, optimization_id: optimizationId })
-    }),
+
+  // Affiliate mode: no in-app checkout. The app opens these backend redirect URLs in the browser.
+  affiliateRedirectUrl: (optimizationId: string, merchantId: string) =>
+    `${API_URL}/affiliate/redirect/${optimizationId}/${merchantId}`,
+
   getShipments: (userId: string) => request(`/shipments/${userId}`),
+
   addManualShipment: (userId: string, carrier: string, trackingCode: string, description: string) =>
     request('/shipments/manual', {
       method: 'POST',
-      body: JSON.stringify({
-        user_id: userId,
-        carrier,
-        tracking_code: trackingCode,
-        description
-      })
+      body: JSON.stringify({ user_id: userId, carrier, tracking_code: trackingCode, description })
     })
 };

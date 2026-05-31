@@ -48,31 +48,35 @@ export function PackagesScreen() {
         contentContainerStyle={styles.list}
         ListEmptyComponent={
           <Card>
-            <Text style={styles.emptyTitle}>Geen pakketten onderweg</Text>
-            <Text style={styles.muted}>Bestellingen uit de app verschijnen hier automatisch.</Text>
+            <Text style={styles.emptyTitle}>Geen pakketten toegevoegd</Text>
+            <Text style={styles.muted}>
+              Omdat bestellingen nu via webshops lopen, verschijnen pakketten niet automatisch. Voeg je track & trace code handmatig toe zodra je die ontvangt.
+            </Text>
           </Card>
         }
         renderItem={({ item }) => (
           <Card>
-            <View style={styles.badge}><Text style={styles.badgeText}>{item.status}</Text></View>
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>{item.status}</Text>
+            </View>
             <Text style={styles.shipmentTitle}>{item.description}</Text>
             <Text style={styles.muted}>{item.carrier} · {item.tracking_code}</Text>
-            {item.seller_name && <Text style={styles.muted}>Verkoper: {item.seller_name}</Text>}
+            {item.seller_name && <Text style={styles.muted}>Webshop: {item.seller_name}</Text>}
             {item.eta && <Text style={styles.eta}>Verwacht: {item.eta}</Text>}
           </Card>
         )}
       />
       <Button title="Track & trace toevoegen" onPress={() => setModalVisible(true)} variant="secondary" />
 
-      <Modal visible={modalVisible} animationType="slide" presentationStyle="pageSheet">
+      <Modal visible={modalVisible} animationType="slide">
         <View style={styles.modal}>
           <Text style={styles.title}>Pakket toevoegen</Text>
           <TextInput style={styles.input} value={carrier} onChangeText={setCarrier} placeholder="Vervoerder" />
           <TextInput style={styles.input} value={trackingCode} onChangeText={setTrackingCode} placeholder="Track & trace" />
           <TextInput style={styles.input} value={description} onChangeText={setDescription} placeholder="Omschrijving" />
-          <Button title="Toevoegen" onPress={addManual} />
+          <Button title="Opslaan" onPress={addManual} />
           <View style={{ height: spacing.sm }} />
-          <Button title="Sluiten" variant="secondary" onPress={() => setModalVisible(false)} />
+          <Button title="Annuleren" variant="secondary" onPress={() => setModalVisible(false)} />
         </View>
       </Modal>
     </View>
@@ -80,65 +84,15 @@ export function PackagesScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-    padding: spacing.lg
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: colors.text,
-    marginBottom: spacing.md
-  },
-  list: {
-    gap: spacing.md,
-    paddingBottom: spacing.lg
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: colors.text
-  },
-  muted: {
-    color: colors.muted,
-    marginTop: 4
-  },
-  shipmentTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: colors.text,
-    marginTop: spacing.sm
-  },
-  eta: {
-    color: colors.success,
-    fontWeight: '800',
-    marginTop: spacing.sm
-  },
-  badge: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.accentSoft,
-    borderRadius: 999,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs
-  },
-  badgeText: {
-    color: colors.accent,
-    fontWeight: '800'
-  },
-  modal: {
-    flex: 1,
-    backgroundColor: colors.background,
-    padding: spacing.lg,
-    justifyContent: 'center'
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 14,
-    padding: spacing.md,
-    marginBottom: spacing.md,
-    backgroundColor: '#fff',
-    fontSize: 16
-  }
+  container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg },
+  title: { fontSize: 32, fontWeight: '900', color: colors.text, marginBottom: spacing.md },
+  list: { gap: spacing.md, paddingBottom: spacing.lg },
+  emptyTitle: { fontSize: 18, fontWeight: '800', color: colors.text },
+  muted: { color: colors.muted, marginTop: 4 },
+  shipmentTitle: { fontSize: 18, fontWeight: '900', color: colors.text, marginTop: spacing.sm },
+  eta: { color: colors.success, fontWeight: '800', marginTop: spacing.sm },
+  badge: { alignSelf: 'flex-start', backgroundColor: colors.accentSoft, borderRadius: 999, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
+  badgeText: { color: colors.accent, fontWeight: '800' },
+  modal: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, justifyContent: 'center' },
+  input: { borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: spacing.md, marginBottom: spacing.md, backgroundColor: '#fff', fontSize: 16 }
 });
