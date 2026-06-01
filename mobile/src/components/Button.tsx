@@ -1,20 +1,27 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
-import { colors, radius, spacing } from '../theme';
+import { ActivityIndicator, Pressable, StyleSheet, Text, ViewStyle } from 'react-native';
+import { colors, radius, shadow, spacing } from '../theme';
+
+type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'dark';
 
 export function Button({
   title,
   onPress,
   disabled,
   loading,
-  variant = 'primary'
+  variant = 'primary',
+  style
 }: {
   title: string;
   onPress: () => void;
   disabled?: boolean;
   loading?: boolean;
-  variant?: 'primary' | 'secondary' | 'danger';
+  variant?: ButtonVariant;
+  style?: ViewStyle;
 }) {
+  const isPrimary = variant === 'primary';
+  const spinnerColor = variant === 'secondary' || variant === 'ghost' ? colors.navy : colors.white;
+
   return (
     <Pressable
       onPress={onPress}
@@ -24,11 +31,28 @@ export function Button({
         variant === 'primary' && styles.primary,
         variant === 'secondary' && styles.secondary,
         variant === 'danger' && styles.danger,
+        variant === 'ghost' && styles.ghost,
+        variant === 'dark' && styles.dark,
+        isPrimary && shadow.soft,
         (disabled || loading) && styles.disabled,
-        pressed && { opacity: 0.85 }
+        pressed && styles.pressed,
+        style
       ]}
     >
-      {loading ? <ActivityIndicator color="#fff" /> : <Text style={[styles.text, variant === 'secondary' && styles.secondaryText]}>{title}</Text>}
+      {loading ? (
+        <ActivityIndicator color={spinnerColor} />
+      ) : (
+        <Text
+          style={[
+            styles.text,
+            variant === 'secondary' && styles.secondaryText,
+            variant === 'ghost' && styles.ghostText,
+            variant === 'dark' && styles.darkText
+          ]}
+        >
+          {title}
+        </Text>
+      )}
     </Pressable>
   );
 }
@@ -39,26 +63,48 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    minHeight: 54
   },
   primary: {
-    backgroundColor: colors.accent
+    backgroundColor: colors.coral
   },
   secondary: {
-    backgroundColor: colors.accentSoft
+    backgroundColor: colors.mintSoft,
+    borderWidth: 1,
+    borderColor: '#BDF5E8'
   },
   danger: {
     backgroundColor: colors.danger
   },
+  ghost: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: colors.border
+  },
+  dark: {
+    backgroundColor: colors.navy
+  },
   disabled: {
-    opacity: 0.55
+    opacity: 0.5
+  },
+  pressed: {
+    transform: [{ scale: 0.985 }],
+    opacity: 0.9
   },
   text: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 16
+    color: colors.white,
+    fontWeight: '900',
+    fontSize: 16,
+    letterSpacing: -0.1
   },
   secondaryText: {
-    color: colors.accent
+    color: colors.navy
+  },
+  ghostText: {
+    color: colors.navy
+  },
+  darkText: {
+    color: colors.white
   }
 });

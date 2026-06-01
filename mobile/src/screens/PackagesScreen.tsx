@@ -2,10 +2,12 @@ import React, { useCallback, useState } from 'react';
 import { Alert, FlatList, Modal, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { api } from '../api/client';
+import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
+import { BrandHeader } from '../components/BrandLogo';
 import { Card } from '../components/Card';
 import { useAuth } from '../context/AuthContext';
-import { colors, spacing } from '../theme';
+import { colors, radius, spacing, typography } from '../theme';
 import { Shipment } from '../types';
 
 export function PackagesScreen() {
@@ -41,28 +43,26 @@ export function PackagesScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Pakketten</Text>
+      <BrandHeader eyebrow="Tracking" title="Je pakketten" subtitle="Bestellingen lopen via webshops. Voeg track & trace handmatig toe zodra je die ontvangt." />
       <FlatList
         data={shipments}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         ListEmptyComponent={
-          <Card>
-            <Text style={styles.emptyTitle}>Geen pakketten toegevoegd</Text>
-            <Text style={styles.muted}>
-              Omdat bestellingen nu via webshops lopen, verschijnen pakketten niet automatisch. Voeg je track & trace code handmatig toe zodra je die ontvangt.
-            </Text>
+          <Card style={styles.emptyCard} variant="mint">
+            <Text style={styles.emptyTitle}>Nog geen pakketten</Text>
+            <Text style={styles.muted}>Open straks je webshop-links, bestel daar en voeg daarna je trackingcode hier toe.</Text>
           </Card>
         }
         renderItem={({ item }) => (
-          <Card>
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>{item.status}</Text>
+          <Card style={styles.shipmentCard}>
+            <View style={styles.cardHeader}>
+              <Badge label={item.status} tone="mint" />
+              {item.eta && <Badge label={`ETA ${item.eta}`} tone="neutral" />}
             </View>
             <Text style={styles.shipmentTitle}>{item.description}</Text>
             <Text style={styles.muted}>{item.carrier} · {item.tracking_code}</Text>
             {item.seller_name && <Text style={styles.muted}>Webshop: {item.seller_name}</Text>}
-            {item.eta && <Text style={styles.eta}>Verwacht: {item.eta}</Text>}
           </Card>
         )}
       />
@@ -70,13 +70,15 @@ export function PackagesScreen() {
 
       <Modal visible={modalVisible} animationType="slide">
         <View style={styles.modal}>
-          <Text style={styles.title}>Pakket toevoegen</Text>
-          <TextInput style={styles.input} value={carrier} onChangeText={setCarrier} placeholder="Vervoerder" />
-          <TextInput style={styles.input} value={trackingCode} onChangeText={setTrackingCode} placeholder="Track & trace" />
-          <TextInput style={styles.input} value={description} onChangeText={setDescription} placeholder="Omschrijving" />
-          <Button title="Opslaan" onPress={addManual} />
-          <View style={{ height: spacing.sm }} />
-          <Button title="Annuleren" variant="secondary" onPress={() => setModalVisible(false)} />
+          <BrandHeader eyebrow="Nieuw pakket" title="Tracking toevoegen" subtitle="Bewaar je track & trace code in SlimBesteld." />
+          <Card style={styles.modalCard}>
+            <TextInput style={styles.input} value={carrier} onChangeText={setCarrier} placeholder="Vervoerder" placeholderTextColor={colors.subtle} />
+            <TextInput style={styles.input} value={trackingCode} onChangeText={setTrackingCode} placeholder="Track & trace" placeholderTextColor={colors.subtle} />
+            <TextInput style={styles.input} value={description} onChangeText={setDescription} placeholder="Omschrijving" placeholderTextColor={colors.subtle} />
+            <Button title="Opslaan" onPress={addManual} />
+            <View style={{ height: spacing.sm }} />
+            <Button title="Annuleren" variant="ghost" onPress={() => setModalVisible(false)} />
+          </Card>
         </View>
       </Modal>
     </View>
@@ -84,15 +86,15 @@ export function PackagesScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg },
-  title: { fontSize: 32, fontWeight: '900', color: colors.text, marginBottom: spacing.md },
+  container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, paddingBottom: 105 },
   list: { gap: spacing.md, paddingBottom: spacing.lg },
-  emptyTitle: { fontSize: 18, fontWeight: '800', color: colors.text },
-  muted: { color: colors.muted, marginTop: 4 },
-  shipmentTitle: { fontSize: 18, fontWeight: '900', color: colors.text, marginTop: spacing.sm },
-  eta: { color: colors.success, fontWeight: '800', marginTop: spacing.sm },
-  badge: { alignSelf: 'flex-start', backgroundColor: colors.accentSoft, borderRadius: 999, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
-  badgeText: { color: colors.accent, fontWeight: '800' },
+  emptyCard: { padding: spacing.lg },
+  emptyTitle: { fontSize: 19, fontWeight: '900', color: colors.text, marginBottom: spacing.xs },
+  muted: { ...typography.body, fontSize: 14, lineHeight: 21, marginTop: 4 },
+  shipmentCard: { gap: spacing.xs },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm },
+  shipmentTitle: { fontSize: 19, fontWeight: '900', color: colors.text, marginTop: spacing.sm, letterSpacing: -0.2 },
   modal: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, justifyContent: 'center' },
-  input: { borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: spacing.md, marginBottom: spacing.md, backgroundColor: '#fff', fontSize: 16 }
+  modalCard: { padding: spacing.lg },
+  input: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md, backgroundColor: colors.white, fontSize: 16, color: colors.text }
 });

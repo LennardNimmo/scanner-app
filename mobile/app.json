@@ -1,23 +1,24 @@
 {
   "expo": {
-    "name": "ScanDeal",
-    "slug": "scandeal-marketplace",
+    "name": "SlimBesteld",
+    "slug": "slimbesteld",
     "version": "0.1.0",
     "orientation": "portrait",
-    "scheme": "scandeal",
+    "scheme": "slimbesteld",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.example.scandeal"
+      "bundleIdentifier": "com.lennardnimmo.slimbesteld"
     },
     "android": {
-      "package": "com.example.scandeal"
+      "package": "com.lennardnimmo.slimbesteld"
     },
     "plugins": [
       [
         "expo-camera",
         {
-          "cameraPermission": "We gebruiken je camera om barcodes te scannen."
+          "cameraPermission": "SlimBesteld gebruikt je camera om productbarcodes te scannen.",
+          "barcodeScannerEnabled": true
         }
       ]
     ],
