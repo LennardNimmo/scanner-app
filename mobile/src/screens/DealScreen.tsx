@@ -36,7 +36,7 @@ export function DealScreen({ route }: any) {
         <Badge label="Goedkoopste totaal" tone="dark" />
         <Text style={styles.heroLabel}>Inclusief verzending</Text>
         <Text style={styles.total}>{formatMoney(optimization.total_cents)}</Text>
-        <Text style={styles.heroMuted}>{optimization.selected_merchants_count || merchantLines.length} webshop(s) · affiliate doorverwijzing</Text>
+        <Text style={styles.heroMuted}>{optimization.selected_merchants_count || merchantLines.length} webshop(s) geselecteerd</Text>
       </Card>
 
       <View style={styles.row}>
@@ -62,7 +62,7 @@ export function DealScreen({ route }: any) {
 
       <Card variant="mint">
         <Text style={styles.infoTitle}>Controleer bij de webshop</Text>
-        <Text style={styles.muted}>SlimBesteld stuurt je door via affiliate-links. De definitieve prijs, voorraad en verzendkosten zie je altijd bij de webshop zelf.</Text>
+        <Text style={styles.muted}>SlimBesteld opent de webshop voor je. Controleer de definitieve prijs, voorraad en verzendkosten altijd nog één keer voordat je bestelt.</Text>
       </Card>
 
       {merchantLines.map((line, index) => (
@@ -72,7 +72,7 @@ export function DealScreen({ route }: any) {
               <Badge label={`Stap ${index + 1}`} tone="mint" />
               <Text style={styles.merchant}>{line.merchant.name || line.merchant.company_name}</Text>
             </View>
-            {!!line.merchant.affiliate_network && <Badge label={line.merchant.affiliate_network} tone="neutral" />}
+
           </View>
           <Text style={styles.muted}>{line.carrier || 'Levering'} · levertijd max. {line.delivery_days_max} dagen</Text>
 

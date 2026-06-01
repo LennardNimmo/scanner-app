@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { Alert, FlatList, Modal, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { api } from '../api/client';
 import { Badge } from '../components/Badge';
@@ -43,7 +43,7 @@ export function PackagesScreen() {
 
   return (
     <View style={styles.container}>
-      <BrandHeader eyebrow="Tracking" title="Je pakketten" subtitle="Bestellingen lopen via webshops. Voeg track & trace handmatig toe zodra je die ontvangt." />
+      <BrandHeader eyebrow="Tracking" title="Je pakketten" subtitle="Voeg track & trace handmatig toe zodra je die van de webshop ontvangt." />
       <FlatList
         data={shipments}
         keyExtractor={(item) => item.id}
@@ -51,7 +51,7 @@ export function PackagesScreen() {
         ListEmptyComponent={
           <Card style={styles.emptyCard} variant="mint">
             <Text style={styles.emptyTitle}>Nog geen pakketten</Text>
-            <Text style={styles.muted}>Open straks je webshop-links, bestel daar en voeg daarna je trackingcode hier toe.</Text>
+            <Text style={styles.muted}>Bestel bij de gekozen webshop en voeg daarna je trackingcode hier toe.</Text>
           </Card>
         }
         renderItem={({ item }) => (
@@ -69,17 +69,19 @@ export function PackagesScreen() {
       <Button title="Track & trace toevoegen" onPress={() => setModalVisible(true)} variant="secondary" />
 
       <Modal visible={modalVisible} animationType="slide">
-        <View style={styles.modal}>
-          <BrandHeader eyebrow="Nieuw pakket" title="Tracking toevoegen" subtitle="Bewaar je track & trace code in SlimBesteld." />
-          <Card style={styles.modalCard}>
-            <TextInput style={styles.input} value={carrier} onChangeText={setCarrier} placeholder="Vervoerder" placeholderTextColor={colors.subtle} />
-            <TextInput style={styles.input} value={trackingCode} onChangeText={setTrackingCode} placeholder="Track & trace" placeholderTextColor={colors.subtle} />
-            <TextInput style={styles.input} value={description} onChangeText={setDescription} placeholder="Omschrijving" placeholderTextColor={colors.subtle} />
-            <Button title="Opslaan" onPress={addManual} />
-            <View style={{ height: spacing.sm }} />
-            <Button title="Annuleren" variant="ghost" onPress={() => setModalVisible(false)} />
-          </Card>
-        </View>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalKeyboard}>
+          <ScrollView contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+            <BrandHeader eyebrow="Nieuw pakket" title="Tracking toevoegen" subtitle="Bewaar je track & trace code in SlimBesteld." />
+            <Card style={styles.modalCard}>
+              <TextInput style={styles.input} value={carrier} onChangeText={setCarrier} placeholder="Vervoerder" placeholderTextColor={colors.subtle} />
+              <TextInput style={styles.input} value={trackingCode} onChangeText={setTrackingCode} placeholder="Track & trace" placeholderTextColor={colors.subtle} />
+              <TextInput style={styles.input} value={description} onChangeText={setDescription} placeholder="Omschrijving" placeholderTextColor={colors.subtle} />
+              <Button title="Opslaan" onPress={addManual} />
+              <View style={{ height: spacing.sm }} />
+              <Button title="Annuleren" variant="ghost" onPress={() => setModalVisible(false)} />
+            </Card>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -94,7 +96,8 @@ const styles = StyleSheet.create({
   shipmentCard: { gap: spacing.xs },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm },
   shipmentTitle: { fontSize: 19, fontWeight: '900', color: colors.text, marginTop: spacing.sm, letterSpacing: -0.2 },
-  modal: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, justifyContent: 'center' },
+  modalKeyboard: { flex: 1, backgroundColor: colors.background },
+  modalContent: { flexGrow: 1, padding: spacing.lg, justifyContent: 'center' },
   modalCard: { padding: spacing.lg },
   input: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.md, backgroundColor: colors.white, fontSize: 16, color: colors.text }
 });

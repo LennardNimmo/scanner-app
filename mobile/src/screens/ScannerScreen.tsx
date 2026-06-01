@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import { api } from '../api/client';
 import { Badge } from '../components/Badge';
@@ -13,18 +13,24 @@ export function ScannerScreen({ navigation }: any) {
   const { user } = useAuth();
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
-  const [manualCode, setManualCode] = useState('8710000000011');
+  const [manualCode, setManualCode] = useState('');
   const [loading, setLoading] = useState(false);
 
   const hasPermission = permission?.granted ?? false;
   const permissionLoading = !permission;
 
   async function addBarcode(gtin: string) {
+    const cleanGtin = gtin.trim();
     if (!user || loading) return;
+    if (!cleanGtin) {
+      Alert.alert('EAN ontbreekt', 'Scan een barcode of vul een EAN-code in.');
+      return;
+    }
     setLoading(true);
     try {
-      const response: any = await api.scan(user.id, gtin.trim(), 1);
+      const response: any = await api.scan(user.id, cleanGtin, 1);
       Alert.alert('Toegevoegd', `${response.product.name} staat in je SlimBesteld-mandje.`);
+      setManualCode('');
       navigation.navigate('Winkelwagen');
     } catch (error: any) {
       Alert.alert('Niet gevonden', error.message);
@@ -41,12 +47,12 @@ export function ScannerScreen({ navigation }: any) {
   }
 
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
       <BrandHeader eyebrow="Scanner" title="Scan je lege product" subtitle="Richt je camera op een EAN-code. SlimBesteld zet het product direct in je mandje." />
 
       <Card style={styles.scannerCard} variant="dark">
         <View style={styles.scanOverlayTop}>
-          <Badge label="Live barcode scan" tone="dark" />
+          <Badge label="Barcode scannen" tone="dark" />
         </View>
         {permissionLoading && <Text style={styles.cameraText}>Camera-toestemming laden...</Text>}
         {!permissionLoading && !hasPermission && (
@@ -72,26 +78,27 @@ export function ScannerScreen({ navigation }: any) {
 
       <Card style={styles.manualCard}>
         <View style={styles.manualHeader}>
-          <Text style={styles.sectionTitle}>Handmatig testen</Text>
-          <Badge label="EAN" tone="mint" />
+          <Text style={styles.sectionTitle}>EAN handmatig invoeren</Text>
+          <Badge label="Optioneel" tone="mint" />
         </View>
         <TextInput
           style={styles.input}
           value={manualCode}
           onChangeText={setManualCode}
           keyboardType="number-pad"
-          placeholder="EAN / GTIN"
+          placeholder="Bijvoorbeeld 8710000000011"
           placeholderTextColor={colors.subtle}
         />
         <Button title="Toevoegen aan mandje" onPress={() => addBarcode(manualCode)} loading={loading} />
         {scanned && <Button title="Opnieuw scannen" variant="secondary" onPress={() => setScanned(false)} style={{ marginTop: spacing.sm }} />}
       </Card>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, paddingBottom: 100, gap: spacing.md },
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { padding: spacing.lg, paddingBottom: 120, gap: spacing.md },
   scannerCard: { height: 300, overflow: 'hidden', padding: 0 },
   scanOverlayTop: { position: 'absolute', top: spacing.md, left: spacing.md, zIndex: 2 },
   cameraWrap: { flex: 1 },
@@ -119,7 +126,7 @@ const styles = StyleSheet.create({
   cameraTitle: { color: colors.white, fontSize: 22, fontWeight: '900' },
   cameraText: { color: '#C6D0E3', lineHeight: 22 },
   manualCard: { padding: spacing.lg },
-  manualHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md },
+  manualHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md, gap: spacing.sm },
   sectionTitle: { ...typography.sectionTitle },
   input: {
     borderWidth: 1,

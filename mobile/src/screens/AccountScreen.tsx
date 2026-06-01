@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { BrandHeader } from '../components/BrandLogo';
@@ -11,8 +11,8 @@ export function AccountScreen() {
   const { user, logout } = useAuth();
 
   return (
-    <View style={styles.container}>
-      <BrandHeader eyebrow="Profiel" title="Account" subtitle="Beheer je SlimBesteld-sessie en app-informatie." />
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <BrandHeader eyebrow="Profiel" title="Account" subtitle="Bekijk je account en beheer je SlimBesteld-sessie." />
 
       <Card style={styles.profileCard} variant="dark">
         <View style={styles.avatar}>
@@ -26,24 +26,30 @@ export function AccountScreen() {
 
       <Card style={styles.infoCard}>
         <View style={styles.infoHeader}>
-          <Text style={styles.sectionTitle}>Affiliate model</Text>
-          <Badge label="MVP" tone="mint" />
+          <Text style={styles.sectionTitle}>Zo werkt SlimBesteld</Text>
+          <Badge label="Slim vergelijken" tone="mint" />
         </View>
-        <Text style={styles.muted}>SlimBesteld berekent de beste combinatie en opent affiliate-links. Je rekent af bij de webshop zelf.</Text>
+        <Text style={styles.muted}>Scan producten die op zijn, vergelijk je hele mandje en open de webshops waar je het voordeligst uit bent.</Text>
       </Card>
 
       <Card style={styles.infoCard} variant="mint">
-        <Text style={styles.sectionTitle}>Merkstijl actief</Text>
-        <Text style={styles.muted}>Midnight Navy, Electric Mint en Signal Coral zijn nu toegepast in de app-interface.</Text>
+        <Text style={styles.sectionTitle}>Bestellen bij webshops</Text>
+        <Text style={styles.muted}>Je rondt je bestelling af bij de webshop zelf. De definitieve prijs, voorraad en levertijd controleer je daar nog één keer.</Text>
+      </Card>
+
+      <Card style={styles.infoCard}>
+        <Text style={styles.sectionTitle}>Pakketten volgen</Text>
+        <Text style={styles.muted}>Ontvang je een track & trace code? Voeg die handmatig toe in het pakketoverzicht, zodat je alles op één plek bewaart.</Text>
       </Card>
 
       <Button title="Uitloggen" variant="danger" onPress={() => { logout(); }} />
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.background, padding: spacing.lg, paddingBottom: 105, gap: spacing.md },
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { padding: spacing.lg, paddingBottom: 120, gap: spacing.md },
   profileCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.lg },
   avatar: { width: 58, height: 58, borderRadius: 22, backgroundColor: colors.mint, alignItems: 'center', justifyContent: 'center' },
   avatarText: { color: colors.navy, fontSize: 24, fontWeight: '900' },
