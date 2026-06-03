@@ -16,11 +16,13 @@ from fastapi.responses import RedirectResponse
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .awin_importer import import_all_active_awin_sources, import_awin_source
 from .schemas import CartItemUpdateRequest, ManualShipmentRequest, ScanRequest
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+ADMIN_IMPORT_TOKEN = os.getenv("ADMIN_IMPORT_TOKEN")
 
 app = FastAPI(title="Scan Affiliate API", version="0.4.0")
 
@@ -246,6 +248,63 @@ def list_merchants() -> Dict[str, Any]:
 def list_sellers() -> Dict[str, Any]:
     data = list_merchants()
     return {"sellers": data["merchants"], "shipping_rules": data["shipping_rules"]}
+
+
+def require_admin(x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")) -> None:
+    if not ADMIN_IMPORT_TOKEN:
+        raise HTTPException(status_code=500, detail="ADMIN_IMPORT_TOKEN is not configured")
+    if not x_admin_token or x_admin_token != ADMIN_IMPORT_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
+@app.get("/admin/affiliate/sources")
+def admin_list_affiliate_sources(_: None = Depends(require_admin)) -> Dict[str, Any]:
+    with db() as conn:
+        sources = conn.execute(
+            """
+            select s.id, s.merchant_id, m.name as merchant_name, s.network, s.source_type,
+                   s.delimiter, s.compression, s.format, s.refresh_interval_minutes,
+                   s.last_started_at, s.last_success_at, s.last_error_at, s.last_error_message,
+                   s.rows_read, s.rows_imported, s.rows_failed, s.active, s.created_at
+            from affiliate_sources s
+            join merchants m on m.id=s.merchant_id
+            order by m.name, s.created_at
+            """
+        ).fetchall()
+        return {"sources": rows_json(sources)}
+
+
+@app.post("/admin/affiliate/import/{source_id}")
+def admin_import_awin_source(source_id: str, _: None = Depends(require_admin)) -> Dict[str, Any]:
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is not configured")
+    summary = import_awin_source(DATABASE_URL, source_id)
+    return {"import": summary.as_dict()}
+
+
+@app.post("/admin/affiliate/import-all")
+def admin_import_all_awin_sources(_: None = Depends(require_admin)) -> Dict[str, Any]:
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is not configured")
+    summaries = import_all_active_awin_sources(DATABASE_URL)
+    return {"imports": summaries}
+
+
+@app.get("/admin/import-jobs")
+def admin_import_jobs(_: None = Depends(require_admin)) -> Dict[str, Any]:
+    with db() as conn:
+        jobs = conn.execute(
+            """
+            select j.id, j.source_id, m.name as merchant_name, s.network, j.status,
+                   j.started_at, j.finished_at, j.rows_read, j.rows_imported, j.rows_failed, j.error_message
+            from import_jobs j
+            left join affiliate_sources s on s.id=j.source_id
+            left join merchants m on m.id=s.merchant_id
+            order by j.started_at desc
+            limit 50
+            """
+        ).fetchall()
+        return {"jobs": rows_json(jobs)}
 
 
 def ensure_active_cart(conn, user_id: str):
